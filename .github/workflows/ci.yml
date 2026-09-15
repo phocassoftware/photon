@@ -28,6 +28,10 @@ jobs:
       - name: Compile project, run tests
         run: ./gradlew build --no-daemon
 
+      - name: Verify Maven publication
+        if: matrix.java == 21
+        run: ./gradlew publishToMavenLocal --no-daemon
+
       - name: Rename jar with version and git SHA
         if: matrix.java == 21
         run: |
