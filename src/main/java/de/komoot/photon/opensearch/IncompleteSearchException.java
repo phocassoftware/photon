@@ -21,7 +21,4 @@ public final class IncompleteSearchException extends RuntimeException {
         super(message, cause);
     }
 
-    public int getHttpStatus() {
-        return 503;
-    }
 }

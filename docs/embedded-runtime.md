@@ -1,7 +1,37 @@
 # Embedded Photon runtime
 
-This fork contains an experimental Java embedding path for a batch job that needs to run
-Photon in-process. It is separate from the existing command-line and HTTP server path.
+This fork contains an experimental Java embedding path for the `dp-query-engine` batch job that
+needs to run Photon in-process. The Phocas-specific API is intentionally limited to forward
+address lookup; structured and reverse geocoding remain existing upstream functionality and are
+not part of this integration. It is separate from the existing command-line and HTTP server path.
+
+## Maven dependency
+
+The fork publishes the Java component to the private GitHub Maven repository. The version
+keeps the upstream Photon version and adds the `-phocas` suffix. For example, the fork of
+Photon 1.3.0 is available as:
+
+```xml
+<repository>
+    <id>github-photon</id>
+    <url>https://maven.pkg.github.com/phocassoftware/photon</url>
+</repository>
+
+<dependency>
+    <groupId>de.komoot.photon</groupId>
+    <artifactId>photon</artifactId>
+    <version>1.3.0-phocas</version>
+</dependency>
+```
+
+Configure a GitHub token with package-read access in the Maven server entry matching the
+repository id. The GitHub Release also contains the executable fat JAR used by the existing
+command-line installation; the Maven artifact is the regular Java component with its runtime
+dependencies declared transitively.
+
+Releases are dispatched manually from `master`. Select `current` for the first release of an
+upstream version (for example, `1.3.0-phocas`); patch, minor, and major releases are based on
+the latest `-phocas` release.
 
 ## Runtime ownership
 
@@ -21,10 +51,18 @@ var preparedData = new PhotonDatasetPreparer(cacheDirectory, lockTimeout, pollIn
 
 PhotonRuntimeMaterializer.materialize(preparedData, runtimeRoot.resolve("photon_data"));
 try (var photon = EmbeddedPhotonRuntime.open(runtimeRoot, clusterName)) {
-    var query = new SearchQueryBuilder(address, false, false).build();
-    var result = photon.search(query, 1, queryTimeout);
+    var result = photon.search(address, countryCodes, 5, queryTimeout);
 }
 ```
+
+The forward-search method applies the same strict-then-lenient search path as Photon's normal
+forward endpoint, validates backend completeness on every search, and returns only the coordinate,
+country-code and formatted-address fields needed by the adapter. Coordinates are latitude/longitude
+and `countryCode` is ISO alpha-2 when present.
+
+The convenience method rejects indexed results without coordinates as incomplete. A successful
+complete search with no hits is represented by an empty `hits()` list and is safe for the caller to
+interpret as a no-match.
 
 `source` is supplied by the embedding application. The fork deliberately has no AWS or S3
 dependency: a caller can download and validate an artifact into the staging directory,
@@ -40,5 +78,5 @@ rechecks after waiting, cleans failed staging, and publishes only a completion-m
 dataset through an atomic directory move. The lock is held only during preparation and
 publication, not while a job performs lookups.
 
-This API is intentionally a small PR-1 contract. The Nexus provider adapter, S3 source
+This API is intentionally a small PR-1 contract for forward geocoding. The Nexus provider adapter, S3 source
 implementation, job retry policy and host/deployment configuration remain consumers of it.

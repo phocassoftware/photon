@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Set;
 
@@ -41,17 +42,18 @@ public final class PhotonRuntimeMaterializer {
         if (Files.exists(runtimeDataDirectory, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Photon runtime data directory already exists: " + runtimeDataDirectory);
         }
-        var normalizedReference = referenceDataDirectory.toAbsolutePath().normalize();
-        var normalizedRuntime = runtimeDataDirectory.toAbsolutePath().normalize();
-        if (normalizedReference.equals(normalizedRuntime)
-                || normalizedRuntime.startsWith(normalizedReference)
-                || normalizedReference.startsWith(normalizedRuntime)) {
+        var realReference = referenceDataDirectory.toRealPath();
+        var realRuntime = resolveAgainstRealParent(runtimeDataDirectory);
+        if (overlaps(realReference, realRuntime)) {
             throw new IOException("Photon reference and runtime data directories must be separate trees.");
         }
 
-        Files.createDirectories(runtimeDataDirectory);
         var complete = false;
         try {
+            Files.createDirectories(runtimeDataDirectory);
+            if (overlaps(realReference, runtimeDataDirectory.toRealPath())) {
+                throw new IOException("Photon reference and runtime data directories must be separate trees.");
+            }
             try (var paths = Files.walk(referenceDataDirectory)) {
                 for (var source : paths.sorted(Comparator.comparingInt(Path::getNameCount)).toList()) {
                     var target = runtimeDataDirectory.resolve(referenceDataDirectory.relativize(source));
@@ -66,12 +68,40 @@ public final class PhotonRuntimeMaterializer {
         }
     }
 
+    private static Path resolveAgainstRealParent(Path path) throws IOException {
+        var absolute = path.toAbsolutePath().normalize();
+        var missing = new ArrayList<String>();
+        var existing = absolute;
+        while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            var name = existing.getFileName();
+            if (name == null) {
+                throw new IOException("Photon runtime path has no existing parent: " + path);
+            }
+            missing.add(name.toString());
+            existing = existing.getParent();
+        }
+
+        var resolved = existing.toRealPath();
+        for (var i = missing.size() - 1; i >= 0; i--) {
+            resolved = resolved.resolve(missing.get(i));
+        }
+        return resolved.normalize();
+    }
+
+    private static boolean overlaps(Path first, Path second) {
+        return first.equals(second) || first.startsWith(second) || second.startsWith(first);
+    }
+
     private static void copyEntry(Path referenceRoot, Path source, Path target) throws IOException {
         if (Files.isSymbolicLink(source)) {
             var link = Files.readSymbolicLink(source);
-            var linkTarget = source.getParent().resolve(link).toAbsolutePath().normalize();
-            if (!linkTarget.startsWith(referenceRoot.toAbsolutePath().normalize())) {
+            var linkTarget = source.getParent().resolve(link).normalize();
+            var realLinkTarget = resolveAgainstRealParent(linkTarget);
+            if (!realLinkTarget.startsWith(referenceRoot.toRealPath())) {
                 throw new IOException("Photon dataset symlink escapes the reference data directory: " + source);
+            }
+            if (link.isAbsolute()) {
+                throw new IOException("Photon dataset must not contain absolute symlinks: " + source);
             }
             Files.createSymbolicLink(target, link);
         } else if (Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS)) {

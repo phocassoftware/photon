@@ -5,11 +5,13 @@ import de.komoot.photon.config.PhotonDBLayoutConfig;
 import de.komoot.photon.embedded.PhotonRuntimeMaterializer;
 import de.komoot.photon.nominatim.model.AddressType;
 import de.komoot.photon.nominatim.model.NameMap;
+import de.komoot.photon.opensearch.IncompleteSearchException;
 import de.komoot.photon.opensearch.PhotonIndex;
 import de.komoot.photon.opensearch.SearchQueryBuilder;
 import org.codelibs.opensearch.runner.OpenSearchRunner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.opensearch.client.json.jackson.JacksonJsonpMapper;
@@ -44,6 +46,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * model, and whether the immutable Lucene shard files themselves can be read by multiple
  * independent JVMs. Passing the second check does not make multiple OpenSearch nodes safe.
  */
+@Isolated
 class SharedIndexReaderFeasibilityTest {
     private static final String CLUSTER_NAME = "photon-feasibility";
     private static final int READER_COUNT = 4;
@@ -206,6 +209,89 @@ class SharedIndexReaderFeasibilityTest {
     }
 
     @Test
+    void embeddedRuntimeExecutesForwardGeocodingSearchWithoutHttp(@TempDir Path dataDirectory) throws Exception {
+        final var server = makeServer(dataDirectory);
+        try {
+            addBerlinDocument(server);
+        } finally {
+            server.shutdown();
+        }
+
+        final var sourceData = dataDirectory.resolve("photon_data");
+        makeImmutableLuceneIndexFilesReadOnly(sourceData);
+        final var runtimeRoot = Files.createDirectory(dataDirectory.resolve("embedded-geocoding-runtime"));
+        PhotonRuntimeMaterializer.materialize(sourceData, runtimeRoot.resolve("photon_data"));
+
+        try (var runtime = EmbeddedPhotonRuntime.open(runtimeRoot, CLUSTER_NAME)) {
+            var result = runtime.search(
+                    "1 Alexanderplatz Berlin", List.of("DE"), 1, Duration.ofSeconds(1));
+
+            assertThat(result.totalHits()).isEqualTo(1);
+            assertThat(result.hits()).singleElement().satisfies(hit -> {
+                assertThat(hit.latitude()).isEqualTo(52.51704);
+                assertThat(hit.longitude()).isEqualTo(13.38886);
+                assertThat(hit.countryCode()).isEqualTo("DE");
+                assertThat(hit.formattedAddress()).isEqualTo("berlin, 1 Alexanderplatz, Germany");
+            });
+        }
+    }
+
+    @Test
+    void embeddedRuntimeUsesForwardLenientFallback(@TempDir Path dataDirectory) throws Exception {
+        final var server = makeServer(dataDirectory);
+        try {
+            addBerlinDocument(server);
+        } finally {
+            server.shutdown();
+        }
+
+        final var sourceData = dataDirectory.resolve("photon_data");
+        makeImmutableLuceneIndexFilesReadOnly(sourceData);
+        final var runtimeRoot = Files.createDirectory(dataDirectory.resolve("embedded-fallback-runtime"));
+        PhotonRuntimeMaterializer.materialize(sourceData, runtimeRoot.resolve("photon_data"));
+
+        try (var runtime = EmbeddedPhotonRuntime.open(runtimeRoot, CLUSTER_NAME)) {
+            var result = runtime.search(
+                    "1 Alexanderplaz Berlin", List.of("DE"), 1, Duration.ofSeconds(1));
+
+            assertThat(result.totalHits()).isEqualTo(1);
+            assertThat(result.hits()).singleElement().satisfies(hit -> {
+                assertThat(hit.countryCode()).isEqualTo("DE");
+                assertThat(hit.formattedAddress()).isEqualTo("berlin, 1 Alexanderplatz, Germany");
+            });
+        }
+    }
+
+    @Test
+    void embeddedRuntimeRejectsForwardResultWithoutCoordinates(@TempDir Path dataDirectory) throws Exception {
+        final var server = makeServer(dataDirectory);
+        try {
+            final var importer = server.createImporter(new DatabaseProperties());
+            importer.add(List.of(new PhotonDoc()
+                    .placeId("1001").osmType("N").osmId(1001).tagKey("place").tagValue("city")
+                    .categories(List.of("osm.place.city"))
+                    .importance(0.6).addressType(AddressType.CITY)
+                    .names(NameMap.makeForPlace(Map.of("name", "No Coordinate"), List.of("en")))));
+            importer.finish();
+            server.refreshIndexes();
+        } finally {
+            server.shutdown();
+        }
+
+        final var sourceData = dataDirectory.resolve("photon_data");
+        makeImmutableLuceneIndexFilesReadOnly(sourceData);
+        final var runtimeRoot = Files.createDirectory(dataDirectory.resolve("embedded-invalid-runtime"));
+        PhotonRuntimeMaterializer.materialize(sourceData, runtimeRoot.resolve("photon_data"));
+
+        try (var runtime = EmbeddedPhotonRuntime.open(runtimeRoot, CLUSTER_NAME)) {
+            assertThatThrownBy(() -> runtime.search(
+                    "No Coordinate", List.of(), 1, Duration.ofSeconds(1)))
+                    .isInstanceOf(IncompleteSearchException.class)
+                    .hasMessageContaining("coordinates");
+        }
+    }
+
+    @Test
     void materializerRejectsSymlinksOutsideTheReferenceDataset(@TempDir Path dataDirectory) throws Exception {
         final var referenceData = Files.createDirectory(dataDirectory.resolve("reference"));
         final var externalFile = Files.writeString(dataDirectory.resolve("external"), "not part of Photon");
@@ -215,6 +301,32 @@ class SharedIndexReaderFeasibilityTest {
                 referenceData, dataDirectory.resolve("runtime")))
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("escapes");
+        assertThat(dataDirectory.resolve("runtime")).doesNotExist();
+    }
+
+    @Test
+    void materializerRejectsRuntimePathThroughSymlinkedParent(@TempDir Path dataDirectory) throws Exception {
+        final var referenceData = Files.createDirectory(dataDirectory.resolve("reference"));
+        final var runtimeParent = Files.createSymbolicLink(
+                dataDirectory.resolve("runtime-parent"), referenceData);
+
+        assertThatThrownBy(() -> PhotonRuntimeMaterializer.materialize(
+                referenceData, runtimeParent.resolve("photon_data")))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("separate trees");
+        assertThat(referenceData.resolve("photon_data")).doesNotExist();
+    }
+
+    @Test
+    void materializerRejectsAbsoluteSymlinksInsideTheReferenceDataset(@TempDir Path dataDirectory) throws Exception {
+        final var referenceData = Files.createDirectory(dataDirectory.resolve("reference"));
+        final var internalFile = Files.writeString(referenceData.resolve("internal"), "part of Photon");
+        Files.createSymbolicLink(referenceData.resolve("absolute-link"), internalFile);
+
+        assertThatThrownBy(() -> PhotonRuntimeMaterializer.materialize(
+                referenceData, dataDirectory.resolve("runtime")))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("absolute symlinks");
         assertThat(dataDirectory.resolve("runtime")).doesNotExist();
     }
 
@@ -382,15 +494,17 @@ class SharedIndexReaderFeasibilityTest {
 
     private static void addBerlinDocument(Server server) throws IOException {
         final var importer = server.createImporter(new DatabaseProperties());
-        importer.add(List.of(new PhotonDoc()
+        var berlin = new PhotonDoc()
                 .placeId("1000").osmType("N").osmId(1000).tagKey("place").tagValue("city")
                 .categories(List.of("osm.place.city"))
                 .importance(0.6).addressType(AddressType.CITY)
                 .houseNumber("1")
+                .countryCode("de")
                 .addAddresses(Map.of("street", "Alexanderplatz", "city", "Berlin"), Set.of("en"))
                 .centroid(new GeometryFactory().createPoint(new Coordinate(13.38886, 52.51704)))
-                .names(NameMap.makeForPlace(Map.of("name", "berlin"), List.of("en", "de", "fr", "it")))
-        ));
+                .names(NameMap.makeForPlace(Map.of("name", "berlin"), List.of("en", "de", "fr", "it")));
+        berlin.setCountry(Map.of("default", "Germany"));
+        importer.add(List.of(berlin));
         importer.finish();
         server.refreshIndexes();
     }
