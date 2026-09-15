@@ -34,9 +34,9 @@ public class OpenSearchReverseHandler implements SearchHandler<ReverseRequest> {
         queryBuilder.includeCategories(request.getIncludeCategories());
         queryBuilder.excludeCategories(request.getExcludeCategories());
 
-        final var results = search(queryBuilder.build(),
+        final var results = SearchResponseValidator.requireComplete(search(queryBuilder.build(),
                 request.getLimit(),
-                request.getLocationDistanceSort() ? request.getLocation() : null);
+                request.getLocationDistanceSort() ? request.getLocation() : null));
 
         return ResultScorer.hitsToResultStream(results)
                 .map(r -> r);

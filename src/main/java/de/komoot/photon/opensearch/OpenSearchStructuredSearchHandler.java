@@ -35,11 +35,11 @@ public class OpenSearchStructuredSearchHandler implements SearchHandler<Structur
         int limit = photonRequest.getLimit();
         int extLimit = limit > 1 ? (int) Math.round(photonRequest.getLimit() * 1.5) : 1;
 
-        var results = sendQuery(buildQuery(photonRequest, false), extLimit);
+        var results = SearchResponseValidator.requireComplete(sendQuery(buildQuery(photonRequest, false), extLimit));
 
         var total = results.hits().total();
         if (total == null || total.value() == 0) {
-            results = sendQuery(buildQuery(photonRequest, true), extLimit);
+            results = SearchResponseValidator.requireComplete(sendQuery(buildQuery(photonRequest, true), extLimit));
 
             total = results.hits().total();
             if (total != null && total.value() == 0 && photonRequest.hasStreet()) {
@@ -47,7 +47,7 @@ public class OpenSearchStructuredSearchHandler implements SearchHandler<Structur
                 var houseNumber = photonRequest.getHouseNumber();
                 photonRequest.setStreet(null);
                 photonRequest.setHouseNumber(null);
-                results = sendQuery(buildQuery(photonRequest, true), extLimit);
+                results = SearchResponseValidator.requireComplete(sendQuery(buildQuery(photonRequest, true), extLimit));
                 photonRequest.setStreet(street);
                 photonRequest.setHouseNumber(houseNumber);
             }

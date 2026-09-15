@@ -32,11 +32,11 @@ public class OpenSearchSearchHandler implements SearchHandler<SimpleSearchReques
         // will be reranked and filtered later.
         final int extLimit = (int) Math.round(Math.max(6, request.getLimit()) * 1.5);
 
-        var results = sendQuery(buildQuery(request, false), extLimit);
+        var results = SearchResponseValidator.requireComplete(sendQuery(buildQuery(request, false), extLimit));
 
         var total = results.hits().total();
         if (total == null || total.value() == 0) {
-            results = sendQuery(buildQuery(request, true), extLimit);
+            results = SearchResponseValidator.requireComplete(sendQuery(buildQuery(request, true), extLimit));
         }
 
         var stream = ResultScorer.hitsToResultStream(results)
