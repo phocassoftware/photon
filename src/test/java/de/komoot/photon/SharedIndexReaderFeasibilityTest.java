@@ -3,6 +3,8 @@ package de.komoot.photon;
 import de.komoot.photon.config.PhotonDBConfig;
 import de.komoot.photon.config.PhotonDBLayoutConfig;
 import de.komoot.photon.embedded.PhotonRuntimeMaterializer;
+import de.komoot.photon.json.JsonReader;
+import de.komoot.photon.nominatim.ImportThread;
 import de.komoot.photon.nominatim.model.AddressType;
 import de.komoot.photon.nominatim.model.NameMap;
 import de.komoot.photon.opensearch.IncompleteSearchException;
@@ -38,6 +40,7 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 
 /**
  * Feasibility checks for the agreed four-job topology.
@@ -52,6 +55,7 @@ class SharedIndexReaderFeasibilityTest {
     private static final int READER_COUNT = 4;
     private static final int OPEN_SEARCH_RUNTIME_COUNT = 4;
     private static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(45);
+    private static final String ANDORRA_FIXTURE = "/fixtures/andorra-release-260906.jsonl";
 
     @Test
     void embeddedClientCanQueryPhotonIndexWithoutAnHttpRequest(@TempDir Path dataDirectory) throws Exception {
@@ -232,6 +236,38 @@ class SharedIndexReaderFeasibilityTest {
                 assertThat(hit.longitude()).isEqualTo(13.38886);
                 assertThat(hit.countryCode()).isEqualTo("DE");
                 assertThat(hit.formattedAddress()).isEqualTo("berlin, 1 Alexanderplatz, Germany");
+            });
+        }
+    }
+
+    @Test
+    void embeddedRuntimeGeocodesAnAddressFromARealPhotonDump(@TempDir Path dataDirectory) throws Exception {
+        final var server = makeServer(dataDirectory);
+        try {
+            importAndorraFixture(server);
+        } finally {
+            server.shutdown();
+        }
+
+        final var sourceData = dataDirectory.resolve("photon_data");
+        makeImmutableLuceneIndexFilesReadOnly(sourceData);
+        final var runtimeRoot = Files.createDirectory(dataDirectory.resolve("embedded-real-data-runtime"));
+        PhotonRuntimeMaterializer.materialize(sourceData, runtimeRoot.resolve("photon_data"));
+
+        try (var runtime = EmbeddedPhotonRuntime.open(runtimeRoot, CLUSTER_NAME)) {
+            final var result = runtime.search(
+                    "Carrer de la Llacuna, Andorra la Vella", List.of("AD"), 1, Duration.ofSeconds(1));
+
+            assertThat(result.totalHits()).isPositive();
+            assertThat(result.hits()).singleElement().satisfies(hit -> {
+                assertThat(hit.latitude()).isCloseTo(42.5086053, within(0.000001));
+                assertThat(hit.longitude()).isCloseTo(1.5224384, within(0.000001));
+                assertThat(hit.countryCode()).isEqualTo("AD");
+                if (hit.formattedAddress() != null) {
+                    assertThat(hit.formattedAddress())
+                            .contains("Carrer de la Llacuna")
+                            .contains("Andorra la Vella");
+                }
             });
         }
     }
@@ -506,6 +542,23 @@ class SharedIndexReaderFeasibilityTest {
         berlin.setCountry(Map.of("default", "Germany"));
         importer.add(List.of(berlin));
         importer.finish();
+        server.refreshIndexes();
+    }
+
+    private static void importAndorraFixture(Server server) throws IOException {
+        final var importThread = new ImportThread(server.createImporter(new DatabaseProperties()));
+        try (var fixture = SharedIndexReaderFeasibilityTest.class.getResourceAsStream(ANDORRA_FIXTURE)) {
+            assertThat(fixture).as("the real Photon fixture must be on the test classpath").isNotNull();
+
+            final var reader = new JsonReader(fixture);
+            reader.setLanguages(Set.of("en"));
+            reader.readHeader();
+            reader.readFile(importThread);
+        } finally {
+            importThread.finish();
+        }
+
+        assertThat(importThread.hasErrors()).isFalse();
         server.refreshIndexes();
     }
 
