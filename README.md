@@ -119,6 +119,10 @@ The webserver is then available at `http://localhost:2322`.
 For a full documentation of the usage, including on how to import and
 update a database, see the [Usage documentation](docs/usage.md).
 
+The Phocas fork also contains an experimental in-process runtime for batch workloads. See
+the [embedded runtime documentation](docs/embedded-runtime.md) for its ownership and
+shared-dataset contract.
+
 
 ## Photon API
 

@@ -22,10 +22,12 @@ import org.opensearch.client.opensearch.OpenSearchClient;
 import org.opensearch.client.opensearch._types.HealthStatus;
 import org.opensearch.client.opensearch._types.OpenSearchException;
 import org.opensearch.client.transport.httpclient5.ApacheHttpClient5TransportBuilder;
+import org.opensearch.transport.client.Client;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @NullMarked
 public class Server {
@@ -42,51 +44,70 @@ public class Server {
 
     private static final Logger LOGGER = LogManager.getLogger();
 
-    protected OpenSearchClient client;
+    @Nullable protected OpenSearchClient client;
     @Nullable private OpenSearchRunner runner = null;
+    private final AtomicBoolean shutdown = new AtomicBoolean();
 
     public Server(PhotonDBConfig config, boolean create) throws IOException {
-        final File dataDirectory = new File(config.getDataDirectory(), "photon_data");
-        if (!create && config.getTransportAddresses().isEmpty()) {
-            if (!dataDirectory.isDirectory()) {
-                LOGGER.error("Data directory '{}' doesn't exist.", dataDirectory.getAbsolutePath());
-                throw new IOException("OpenSearch database not found.");
-            }
-
-            final File nodeDirectory = new File(dataDirectory, "node_1");
-
-            if (!nodeDirectory.isDirectory()) {
-                LOGGER.error("Data directory '{}' seems to be empty. Are you using an index for OpenSearch?",
-                        dataDirectory.getAbsolutePath());
-                throw new IOException("OpenSearch database not found.");
-            }
-        }
-
-        HttpHost[] hosts;
-        if (config.getTransportAddresses().isEmpty()) {
-            hosts = startInternal(dataDirectory, config.getCluster());
-        } else {
-            hosts = config.getTransportAddresses().stream()
-                    .map(addr -> addr.split(":", 2))
-                    .map(parts -> new HttpHost("http", parts[0],
-                        parts.length > 1 ? Integer.parseInt(parts[1]) : 9201))
-                    .toArray(HttpHost[]::new);
-        }
-
-        final var mapper = new JacksonJsonpMapper();
-        mapper.objectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-
-        final var transport = ApacheHttpClient5TransportBuilder
-                .builder(hosts)
-                .setMapper(mapper)
-                .build();
-
-        client = new OpenSearchClient(transport);
-
-        waitForReady();
+        this(config, create, false);
     }
 
-    private HttpHost[] startInternal(File dataDirectory, String clusterName) {
+    Server(PhotonDBConfig config, boolean create, boolean embedded) throws IOException {
+        try {
+            final File dataDirectory = new File(config.getDataDirectory(), "photon_data");
+            if (!create && config.getTransportAddresses().isEmpty()) {
+                if (!dataDirectory.isDirectory()) {
+                    LOGGER.error("Data directory '{}' doesn't exist.", dataDirectory.getAbsolutePath());
+                    throw new IOException("OpenSearch database not found.");
+                }
+
+                final File nodeDirectory = new File(dataDirectory, "node_1");
+
+                if (!nodeDirectory.isDirectory()) {
+                    LOGGER.error("Data directory '{}' seems to be empty. Are you using an index for OpenSearch?",
+                            dataDirectory.getAbsolutePath());
+                    throw new IOException("OpenSearch database not found.");
+                }
+            }
+
+            if (embedded) {
+                if (!config.getTransportAddresses().isEmpty()) {
+                    throw new IllegalArgumentException("Embedded Photon requires a local OpenSearch node.");
+                }
+                startInternal(dataDirectory, config.getCluster(), true);
+                waitForReady();
+                return;
+            }
+
+            HttpHost[] hosts;
+            if (config.getTransportAddresses().isEmpty()) {
+                hosts = startInternal(dataDirectory, config.getCluster(), false);
+            } else {
+                hosts = config.getTransportAddresses().stream()
+                        .map(addr -> addr.split(":", 2))
+                        .map(parts -> new HttpHost("http", parts[0],
+                            parts.length > 1 ? Integer.parseInt(parts[1]) : 9201))
+                        .toArray(HttpHost[]::new);
+            }
+
+            final var mapper = new JacksonJsonpMapper();
+            mapper.objectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+            final var transport = ApacheHttpClient5TransportBuilder
+                    .builder(hosts)
+                    .setMapper(mapper)
+                    .build();
+
+            client = new OpenSearchClient(transport);
+
+            waitForReady();
+        } catch (IOException | RuntimeException e) {
+            shutdown();
+            throw e;
+        }
+    }
+
+    private HttpHost[] startInternal(File dataDirectory, String clusterName, boolean embedded) {
         runner = new OpenSearchRunner();
         runner.onBuild((number, settingsBuilder) -> {
             settingsBuilder.put("http.cors.enabled", false);
@@ -94,9 +115,16 @@ public class Server {
             settingsBuilder.putList("discovery.seed_hosts", "127.0.0.1:9201");
             settingsBuilder.put("indices.query.bool.max_clause_count", "30000");
             settingsBuilder.put("index.codec", "best_compression");
-        }).build(OpenSearchRunner.newConfigs()
+            if (embedded) {
+                settingsBuilder.put("http.host", "127.0.0.1");
+                settingsBuilder.put("transport.host", "127.0.0.1");
+                settingsBuilder.put("http.port", "0");
+            }
+        });
+        runner.build(OpenSearchRunner.newConfigs()
                 .basePath(dataDirectory.getAbsolutePath())
                 .clusterName(clusterName)
+                .baseHttpPort(9200)
                 .numOfNode(1)
         );
 
@@ -112,6 +140,10 @@ public class Server {
     }
 
     public void waitForReady() throws IOException {
+        if (runner != null) {
+            runner.ensureYellow();
+            return;
+        }
         client.cluster().health(h -> h.waitForStatus(HealthStatus.Yellow));
     }
 
@@ -121,6 +153,11 @@ public class Server {
     }
 
     public void shutdown() {
+        if (!shutdown.compareAndSet(false, true)) {
+            return;
+        }
+
+        closeClientQuietly();
         if (runner != null) {
             try {
                 LOGGER.info("Shutting down OpenSearch runner");
@@ -180,6 +217,9 @@ public class Server {
     }
 
     private void closeClientQuietly() {
+        if (client == null) {
+            return;
+        }
         try {
             client._transport().close();
         } catch (Exception e) {
@@ -243,6 +283,20 @@ public class Server {
 
     protected OpenSearchClient getClient() {
         return client;
+    }
+
+    /**
+     * Return the embedded node's in-process client when this server owns one.
+     *
+     * This is package-private so callers use {@link EmbeddedPhotonRuntime} instead of
+     * depending on the OpenSearch transport client directly. The normal CLI/server path
+     * continues to use the high-level REST client.
+     */
+    Client getEmbeddedClient() {
+        if (runner == null) {
+            throw new IllegalStateException("This server is connected to an external OpenSearch node.");
+        }
+        return runner.client();
     }
 
     private void registerPhotonDocSerializer(DatabaseProperties dbProperties) {

@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      releaseType:
+        type: choice
+        description: "Version to release"
+        required: true
+        default: current
+        options:
+          - current
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require master branch
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "Stable releases must run from master (got $GITHUB_REF)." >&2
+            exit 1
+          fi
+
+      - name: Set up JDK
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: "temurin"
+          java-version: 21
+          cache: "gradle"
+
+      - name: Get current version
+        id: current_version
+        run: |
+          VERSION=$(./gradlew -q properties --property version --no-daemon | awk '$1 == "version:" { print $2 }')
+          VERSION=${VERSION%-SNAPSHOT}
+          VERSION=${VERSION%-phocas}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Get latest fork release
+        id: latest_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
+            | awk '/-phocas$/ { sub(/-phocas$/, ""); print }' \
+            | sort -V \
+            | tail -n 1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Select version base for bump
+        id: bump_base
+        env:
+          CURRENT_VERSION: ${{ steps.current_version.outputs.version }}
+          LATEST_RELEASE_VERSION: ${{ steps.latest_release.outputs.version }}
+        run: |
+          if [ -z "$LATEST_RELEASE_VERSION" ] \
+              || [ "$(printf '%s\n' "$CURRENT_VERSION" "$LATEST_RELEASE_VERSION" | sort -V | tail -n 1)" = "$CURRENT_VERSION" ]; then
+            VERSION="$CURRENT_VERSION"
+          else
+            VERSION="$LATEST_RELEASE_VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Generate versions
+        id: generate_versions
+        uses: WyriHaximus/github-action-next-semvers@18aa9ed4152808ab99b88d71f5481e41f8d89930 # v1.2.1
+        with:
+          version: ${{ steps.bump_base.outputs.version }}
+
+      - name: Pick release version
+        id: release_version
+        env:
+          RELEASE_TYPE: ${{ inputs.releaseType }}
+          CURRENT_VERSION: ${{ steps.current_version.outputs.version }}
+          PATCH_VERSION: ${{ steps.generate_versions.outputs.patch }}
+          MINOR_VERSION: ${{ steps.generate_versions.outputs.minor }}
+          MAJOR_VERSION: ${{ steps.generate_versions.outputs.major }}
+        run: |
+          case "$RELEASE_TYPE" in
+            current) VERSION="$CURRENT_VERSION" ;;
+            patch) VERSION="$PATCH_VERSION" ;;
+            minor) VERSION="$MINOR_VERSION" ;;
+            major) VERSION="$MAJOR_VERSION" ;;
+            *) echo "Unsupported release type: $RELEASE_TYPE" >&2; exit 1 ;;
+          esac
+          echo "version=${VERSION}-phocas" >> "$GITHUB_OUTPUT"
+
+      - name: Check release does not already exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.release_version.outputs.version }}
+        run: |
+          if git rev-parse --verify "refs/tags/$RELEASE_VERSION" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_VERSION already exists." >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub release $RELEASE_VERSION already exists." >&2
+            exit 1
+          fi
+
+      - name: Build release artifacts
+        env:
+          PHOTON_VERSION: ${{ steps.release_version.outputs.version }}
+        run: ./gradlew build --no-daemon -PphotonVersion="$PHOTON_VERSION"
+
+      - name: Publish Maven package to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PHOTON_VERSION: ${{ steps.release_version.outputs.version }}
+        run: ./gradlew publish --no-daemon -PphotonVersion="$PHOTON_VERSION"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.release_version.outputs.version }}
+        run: |
+          gh release create "$RELEASE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Release $RELEASE_VERSION" \
+            --generate-notes \
+            "target/photon-$RELEASE_VERSION.jar"

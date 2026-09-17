@@ -1,6 +1,7 @@
 package de.komoot.photon.opensearch;
 
 import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import de.komoot.photon.searcher.PhotonResult;
 import org.jspecify.annotations.NullMarked;
@@ -29,6 +30,7 @@ public class OpenSearchResult implements PhotonResult {
     private final Map<String, Map<String, String>> localeTags = new HashMap<>();
 
 
+    @JsonIgnoreProperties("type")
     record ExtentCoordinates (@JsonProperty("coordinates") double[][] coordinates) {
         public double[] getNW() {
             return coordinates[0];
