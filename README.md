@@ -116,14 +116,6 @@ java -jar photon-*.jar serve
 
 The webserver is then available at `http://localhost:2322`.
 
-When Photon runs its local OpenSearch runner inside a host process that owns the structured
-logging configuration, set `PHOTON_DISABLE_ES_LOGGER=true` to prevent the runner from installing
-its own Log4j2 configuration:
-
-```bash
-PHOTON_DISABLE_ES_LOGGER=true java -jar photon-*.jar serve
-```
-
 For a full documentation of the usage, including on how to import and
 update a database, see the [Usage documentation](docs/usage.md).
 

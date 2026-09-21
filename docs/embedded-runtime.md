@@ -43,6 +43,9 @@ transport client. It does not call Photon's HTTP API or a localhost endpoint. Th
 HTTP listener created by the OpenSearch runner is an internal implementation detail and is
 bound to an OS-assigned port.
 
+The embedded entrypoint disables OpenSearchRunner's Log4j2 configuration so the host application
+owns the JVM logging configuration.
+
 Do not open the same OpenSearch node directory from multiple runtimes. A node owns mutable
 metadata and transient files in addition to the Lucene index. Instead, prepare one immutable
 reference dataset and create a private runtime tree for each job:
