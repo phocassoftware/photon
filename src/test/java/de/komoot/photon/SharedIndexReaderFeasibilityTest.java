@@ -10,6 +10,7 @@ import de.komoot.photon.nominatim.model.NameMap;
 import de.komoot.photon.opensearch.IncompleteSearchException;
 import de.komoot.photon.opensearch.PhotonIndex;
 import de.komoot.photon.opensearch.SearchQueryBuilder;
+import de.komoot.photon.query.StructuredSearchRequest;
 import org.codelibs.opensearch.runner.OpenSearchRunner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -229,6 +230,39 @@ class SharedIndexReaderFeasibilityTest {
         try (var runtime = EmbeddedPhotonRuntime.open(runtimeRoot, CLUSTER_NAME)) {
             var result = runtime.search(
                     "1 Alexanderplatz Berlin", List.of("DE"), 1, Duration.ofSeconds(1));
+
+            assertThat(result.totalHits()).isEqualTo(1);
+            assertThat(result.hits()).singleElement().satisfies(hit -> {
+                assertThat(hit.latitude()).isEqualTo(52.51704);
+                assertThat(hit.longitude()).isEqualTo(13.38886);
+                assertThat(hit.countryCode()).isEqualTo("DE");
+                assertThat(hit.formattedAddress()).isEqualTo("berlin, 1 Alexanderplatz, Germany");
+            });
+        }
+    }
+
+    @Test
+    void embeddedRuntimeExecutesStructuredGeocodingSearchWithoutHttp(@TempDir Path dataDirectory) throws Exception {
+        final var server = makeServer(dataDirectory);
+        try {
+            addBerlinDocument(server);
+        } finally {
+            server.shutdown();
+        }
+
+        final var sourceData = dataDirectory.resolve("photon_data");
+        makeImmutableLuceneIndexFilesReadOnly(sourceData);
+        final var runtimeRoot = Files.createDirectory(dataDirectory.resolve("embedded-structured-geocoding-runtime"));
+        PhotonRuntimeMaterializer.materialize(sourceData, runtimeRoot.resolve("photon_data"));
+
+        try (var runtime = EmbeddedPhotonRuntime.open(runtimeRoot, CLUSTER_NAME)) {
+            var request = new StructuredSearchRequest();
+            request.setCountryCode("DE");
+            request.setCity("Berlin");
+            request.setStreet("Alexanderplatz");
+            request.setHouseNumber("1");
+
+            var result = runtime.searchStructured(request, 1, Duration.ofSeconds(1));
 
             assertThat(result.totalHits()).isEqualTo(1);
             assertThat(result.hits()).singleElement().satisfies(hit -> {
