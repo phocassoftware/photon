@@ -2,8 +2,9 @@
 
 This fork contains an experimental Java embedding path for the `dp-query-engine` batch job that
 needs to run Photon in-process. The Phocas-specific API is intentionally limited to forward
-address lookup; structured and reverse geocoding remain existing upstream functionality and are
-not part of this integration. It is separate from the existing command-line and HTTP server path.
+address lookup, including the structured fields used by the locality fallback. Reverse geocoding
+remains existing upstream functionality and is not part of this integration. It is separate from
+the existing command-line and HTTP server path.
 
 ## Maven dependency
 
@@ -64,6 +65,9 @@ The forward-search method applies the same strict-then-lenient search path as Ph
 forward endpoint, validates backend completeness on every search, and returns only the coordinate,
 country-code and formatted-address fields needed by the adapter. Coordinates are latitude/longitude
 and `countryCode` is ISO alpha-2 when present.
+
+The structured-search method applies the same field-specific query construction and fallback as
+Photon's `/structured` endpoint, while executing through the in-process transport client.
 
 The convenience method rejects indexed results without coordinates as incomplete. A successful
 complete search with no hits is represented by an empty `hits()` list and is safe for the caller to

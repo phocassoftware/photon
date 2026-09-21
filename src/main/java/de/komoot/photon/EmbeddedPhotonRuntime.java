@@ -7,6 +7,7 @@ import de.komoot.photon.opensearch.DocFields;
 import de.komoot.photon.opensearch.OpenSearchResult;
 import de.komoot.photon.opensearch.PhotonIndex;
 import de.komoot.photon.opensearch.SearchQueryBuilder;
+import de.komoot.photon.query.StructuredSearchRequest;
 import org.jspecify.annotations.Nullable;
 import org.jspecify.annotations.NullMarked;
 import org.opensearch.action.search.SearchResponse;
@@ -161,11 +162,74 @@ public final class EmbeddedPhotonRuntime implements AutoCloseable {
                         .toList());
     }
 
+    /**
+     * Executes Photon's structured forward address search without using the HTTP API.
+     *
+     * <p>This follows the same field-specific query construction and strict-then-lenient fallback
+     * as Photon's {@code /structured} endpoint.</p>
+     */
+    public GeocodingSearchResult searchStructured(
+            StructuredSearchRequest request, int limit, Duration timeout) {
+        if (request == null) {
+            throw new IllegalArgumentException("Structured search request must not be null.");
+        }
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Search limit must be positive.");
+        }
+
+        final int candidateLimit = limit > 1 ? (int) Math.round(limit * 1.5) : 1;
+        var results = searchStructuredAddressQuery(request, false, candidateLimit, timeout);
+        if (results.totalHits() == 0) {
+            results = searchStructuredAddressQuery(request, true, candidateLimit, timeout);
+
+            if (results.totalHits() == 0 && request.hasStreet()) {
+                final var street = request.getStreet();
+                final var houseNumber = request.getHouseNumber();
+                request.setStreet(null);
+                request.setHouseNumber(null);
+                try {
+                    results = searchStructuredAddressQuery(request, true, candidateLimit, timeout);
+                } finally {
+                    request.setStreet(street);
+                    request.setHouseNumber(houseNumber);
+                }
+            }
+        }
+
+        return new GeocodingSearchResult(
+                results.totalHits(),
+                results.hits().stream()
+                        .limit(limit)
+                        .map(EmbeddedPhotonRuntime::toGeocodingHit)
+                        .toList());
+    }
+
     private SearchResult searchAddressQuery(
             String query, List<String> countryCodes, boolean lenient, int limit, Duration timeout) {
         var queryBuilder = new SearchQueryBuilder(query, lenient, false);
         queryBuilder.addCountryCodeFilter(countryCodes);
         queryBuilder.addImportance(IMPORTANCE_FACTOR);
+        return search(queryBuilder.build(), limit, timeout);
+    }
+
+    private SearchResult searchStructuredAddressQuery(
+            StructuredSearchRequest request, boolean lenient, int limit, Duration timeout) {
+        var queryBuilder = new SearchQueryBuilder(request, lenient);
+        queryBuilder.addOsmTagFilter(request.getOsmTagFilters());
+        queryBuilder.addLayerFilter(request.getLayerFilters());
+
+        if (request.hasLocationBias()) {
+            assert request.getLocationForBias() != null;
+            queryBuilder.addLocationBias(
+                    request.getLocationForBias(),
+                    30.0f * (1.0f - request.getImportanceWeight()),
+                    request.getRadiusForBias(),
+                    request.getDecayRadiusForBias());
+        }
+
+        queryBuilder.includeCategories(request.getIncludeCategories());
+        queryBuilder.excludeCategories(request.getExcludeCategories());
+        queryBuilder.addBoundingBox(request.getBbox());
         return search(queryBuilder.build(), limit, timeout);
     }
 
