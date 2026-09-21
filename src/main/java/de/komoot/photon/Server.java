@@ -121,12 +121,15 @@ public class Server {
                 settingsBuilder.put("http.port", "0");
             }
         });
-        runner.build(OpenSearchRunner.newConfigs()
+        var runnerConfiguration = OpenSearchRunner.newConfigs()
                 .basePath(dataDirectory.getAbsolutePath())
                 .clusterName(clusterName)
                 .baseHttpPort(9200)
-                .numOfNode(1)
-        );
+                .numOfNode(1);
+        if (Boolean.parseBoolean(System.getenv("PHOTON_DISABLE_ES_LOGGER"))) {
+            runnerConfiguration.disableESLogger();
+        }
+        runner.build(runnerConfiguration);
 
         runner.ensureYellow();
 
