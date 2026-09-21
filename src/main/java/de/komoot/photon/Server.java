@@ -126,7 +126,7 @@ public class Server {
                 .clusterName(clusterName)
                 .baseHttpPort(9200)
                 .numOfNode(1);
-        if (Boolean.parseBoolean(System.getenv("PHOTON_DISABLE_ES_LOGGER"))) {
+        if (embedded) {
             runnerConfiguration.disableESLogger();
         }
         runner.build(runnerConfiguration);
