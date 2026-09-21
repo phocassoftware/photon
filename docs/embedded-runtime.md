@@ -30,8 +30,10 @@ command-line installation; the Maven artifact is the regular Java component with
 dependencies declared transitively.
 
 Releases are dispatched manually from `master`. Select `current` for the first release of an
-upstream version (for example, `1.3.0-phocas`); patch, minor, and major releases are based on
-the latest `-phocas` release.
+upstream version (for example, `1.3.0-phocas`). If that fork release already exists but the
+upstream version has not changed, select `currentIncrement`; it creates the next available
+suffix such as `1.3.0-phocas-1`. Patch, minor, and major releases are based on the latest
+`-phocas` release.
 
 ## Runtime ownership
 
